@@ -1,0 +1,9 @@
+# Зависимости продукта OPP. Python ≥ 3.12 (разработка ведётся на 3.14).
+# Пересоздание окружения:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+PyYAML>=6.0          # описание структуры памяти (ЗР-0002)
+python-docx>=1.1.0   # сборка docx-представления документов (cap-render/docx, спека 05-a-render)
+openpyxl>=3.1.0       # сборка xlsx-представления памяти проекта (cap-export/xlsx, спека 06-f-user-flow)
+
+# Опционально (по фичам): mpxj>=16.0 — чтение .mpp (MS Project), требует java.
+# Ставить вручную при необходимости: <venv>/bin/pip install mpxj

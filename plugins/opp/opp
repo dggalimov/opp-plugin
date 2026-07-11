@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Единая точка запуска OPP. Использует локальное окружение .venv, если оно есть;
+# при первом запуске (venv нет) — создаёт его сам и ставит основные зависимости
+# (requirements.txt) из системного python3 (нужен python3 >= 3.12).
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ ! -x "$DIR/.venv/bin/python3" ]; then
+  echo "OPP: первый запуск, готовлю окружение…" >&2
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "OPP: не найден python3. Нужен python3 >= 3.12 в PATH." >&2
+    exit 1
+  fi
+  if ! python3 -m venv "$DIR/.venv" >&2; then
+    echo "OPP: не удалось создать .venv." >&2
+    exit 1
+  fi
+  if ! "$DIR/.venv/bin/pip" install --quiet --disable-pip-version-check \
+      -r "$DIR/requirements.txt" >&2; then
+    echo "OPP: не удалось поставить зависимости (нет сети?)." >&2
+    echo "OPP: поставьте вручную: $DIR/.venv/bin/pip install -r $DIR/requirements.txt" >&2
+    echo "OPP: продолжаю — возможно, системный python3 их уже имеет." >&2
+  fi
+fi
+
+if [ -x "$DIR/.venv/bin/python3" ]; then
+  PY="$DIR/.venv/bin/python3"
+else
+  PY="$(command -v python3)"
+fi
+exec "$PY" "$DIR/cli.py" "$@"
