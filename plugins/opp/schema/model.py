@@ -28,6 +28,9 @@ class Field:
     target: object   # цель (код таблицы | список | спец-цель | None)
     derived: bool    # выводимое
     raw: dict
+    # значимость (напр. «полнота» — пустота поля существующей строки = дыра картины каркаса,
+    # спека 08 §2); default None — конструкторы полей без разметки (тесты, старые вызовы) не ломаются.
+    significance: object = None
 
 
 @dataclass
@@ -72,7 +75,7 @@ def _yaml():
 def _field_of(d: dict) -> Field:
     return Field(name=d.get("имя", ""), kind=d.get("вид", ""), required=d.get("обяз"),
                  enum=d.get("словарь"), target=d.get("цель"),
-                 derived=bool(d.get("выводимое")), raw=d)
+                 derived=bool(d.get("выводимое")), significance=d.get("значимость"), raw=d)
 
 
 def _edge_of(d: dict) -> Edge:

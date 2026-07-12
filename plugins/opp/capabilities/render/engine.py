@@ -39,6 +39,11 @@ SRC; якорь уже знает код встречи).
 по одному конфигу, с базовой линией по другому. Проектный шаблон валидируется ЛЕНИВО, только
 при рендере (не при каждом чтении): `sections_within_projection` + уникальность литеральных
 «номер» секций — раньше, чем документ будет собран из битого шаблона молча.
+
+Клиентское имя файла (спека 08 §8, ЗР-0027 п.7): md-канон (техслой) всегда `<id><suffix>.md`,
+а docx (клиентский слой) может нести человеческое имя по формуле `документ.имя_файла` эффективного
+конфига — `resolve_output_name`. Не часть `render_markdown` (имя файла — забота вызывающего кода,
+не самого рендера) и не влияет на байт-стабильность md.
 """
 
 from __future__ import annotations
@@ -728,6 +733,136 @@ def _text_section_md(section: dict, workspace: Path, params: dict) -> list[str]:
     return lines
 
 
+# --- клиентское имя файла docx (спека 08 §8) -----------------------------------
+
+_FILENAME_TOKEN = re.compile(r"\{(номер|якорь:[^}]+|параметр:[^}]+)\}")
+_FILENAME_NUMBER = re.compile(r"-(\d+)$")
+_FS_UNSAFE = re.compile(r'[\\/:*?"<>|\n]')
+_FILENAME_MAX_LEN = 120
+
+
+def _safe_filename(name: str) -> str:
+    """Санитизация строки под имя файла ФС (спека 08 §8): запрещённые для путей символы
+    (`/ \\ : * ? " < > | и перенос строки`) → «·», трим по краям, потолок длины ~120 символов
+    (не режем посреди слова агрессивно — просто обрезаем и убираем висящие пробелы)."""
+    cleaned = _FS_UNSAFE.sub("·", name).strip()
+    if len(cleaned) > _FILENAME_MAX_LEN:
+        cleaned = cleaned[:_FILENAME_MAX_LEN].rstrip()
+    return cleaned
+
+
+def _row_code(row: dict):
+    """Значение «кодового» поля строки (первое поле «код…»/«id» по имени ключа) — та же эвристика,
+    что у `_row_key_of`, но без схемы (якорная строка для имени файла может прийти из любой
+    таблицы, объявленной в «документ.якорь», схема здесь не нужна — только чтение словаря)."""
+    for k, v in row.items():
+        kl = (k or "").lower()
+        if kl.startswith("код") or kl == "id":
+            return v
+    return None
+
+
+def _filename_anchor_row(document_cfg: dict, rows_by_table: dict, params: dict) -> dict | None:
+    """Якорная строка формулы «имя_файла» — по факту механики документа (спека 08 §8), не всегда
+    совпадает с якорем движка (`_resolve_anchor_row`, жёстко завязанным на параметр «источник»):
+
+    - «документ.якорь» объявлен (протокол встречи, meeting) — строка таблицы якоря, у которой
+      поле якоря (списочное/скалярное) пересекается с ЛЮБЫМ переданным параметром рендера (не
+      только «источник» — имя файла может понадобиться и там, где якорь адресуется иначе);
+    - якоря нет в конфиге (повестка встречи, agenda: свой параметр «встреча» напрямую на код
+      MTG, без якорного стыка) — ищем строку MTG по параметру «встреча» (тот же фильтр, что
+      несёт секция 1 конфига agenda) — единственный документ с {номер}/{якорь:…} без «якоря».
+    """
+    anchor_cfg = document_cfg.get("якорь")
+    if anchor_cfg and anchor_cfg.get("таблица"):
+        candidates = {str(v) for v in params.values() if v}
+        if not candidates:
+            return None
+        field = anchor_cfg.get("поле")
+        for row in rows_by_table.get(anchor_cfg["таблица"]) or []:
+            value = row.get(field)
+            values = value if isinstance(value, list) else [value]
+            if candidates & {str(v) for v in values if v}:
+                return row
+        return None
+    встреча = params.get("встреча")
+    if not встреча:
+        return None
+    for row in rows_by_table.get("MTG") or []:
+        if str(row.get("код встречи")) == str(встреча):
+            return row
+    return None
+
+
+def resolve_output_name(document: str, workspace, params: dict | None = None) -> str | None:
+    """Клиентское имя docx по формуле «документ.имя_файла» эффективного конфига (спека 08 §8,
+    ЗР-0027 п.7): проектный шаблон (`load_config(..., workspace=...)`) переопределяет её как и
+    остальной конфиг. Нет ключа «имя_файла» → None — падать не должен, вызывающий код (cli.py/
+    interface/documents.py) откатывается к дефолт-имени «<id><suffix>».
+
+    Подстановки в шаблоне:
+    - «{номер}» — двузначный номер из кода ЯКОРНОЙ строки (`_filename_anchor_row`): последнее
+      число после дефиса в коде («MTG-03» → 3 → «03», regex «-(\\d+)$»);
+    - «{якорь:<поле>}» — значение поля якорной строки (напр. «{якорь:тема}»);
+    - «{параметр:<имя>}» — параметр рендера (напр. «{параметр:встреча}»).
+
+    Недостающие данные для подстановки (якорь не нашёлся, код якоря без числового хвоста,
+    параметр не передан) — `RenderError`, не молчаливое кривое имя (тот же принцип, что и у
+    остальных плейсхолдеров движка). Результат — через `_safe_filename` (санитизация под ФС).
+    """
+    workspace = Path(workspace)
+    config = load_config(document, workspace=workspace)
+    document_cfg = config.get("документ") or {}
+    template = document_cfg.get("имя_файла")
+    if not template:
+        return None
+    params = params or {}
+    where = f"документ «{document}» (имя_файла)"
+
+    tokens = _FILENAME_TOKEN.findall(template)
+    anchor_row = None
+    if any(t == "номер" or t.startswith("якорь:") for t in tokens):
+        rows_by_table = _rows_by_table(workspace)
+        anchor_cfg = document_cfg.get("якорь")
+        if anchor_cfg and anchor_cfg.get("таблица"):
+            # якорное поле может быть выводимым (контракт: «выводимое: да, источник: …», как
+            # MTG.«источники из встречи») — без аугментации якорь молча не найдётся никогда
+            from schema.model import load_schema
+            schema = load_schema()
+            rows_by_table = _augment_derived(rows_by_table, {anchor_cfg["таблица"]}, schema)
+        anchor_row = _filename_anchor_row(document_cfg, rows_by_table, params)
+        if anchor_row is None:
+            raise RenderError(
+                f"{where}: якорная строка не найдена для параметров рендера {params!r} — "
+                "проверьте --источник/--встреча или память проекта")
+
+    def _sub(m: "re.Match") -> str:
+        token = m.group(1)
+        if token == "номер":
+            code = _row_code(anchor_row) if anchor_row else None
+            num_match = _FILENAME_NUMBER.search(str(code)) if code else None
+            if not num_match:
+                raise RenderError(
+                    f"{where}: «{{номер}}» ожидает код якорной строки вида «…-N» "
+                    f"(получено «{code}»)")
+            return f"{int(num_match.group(1)):02d}"
+        if token.startswith("якорь:"):
+            field = token[len("якорь:"):]
+            if field not in anchor_row:
+                raise RenderError(
+                    f"{where}: поле «{field}» отсутствует в якорной строке "
+                    f"(плейсхолдер «{{якорь:{field}}}»)")
+            return str(anchor_row.get(field))
+        name = token[len("параметр:"):]
+        if name not in params or params[name] in (None, ""):
+            raise RenderError(
+                f"{where}: конфиг ожидает параметр «{name}» (плейсхолдер «{{параметр:{name}}}»), "
+                f"он не передан — укажите ./opp render … --{name} <значение>")
+        return str(params[name])
+
+    return _safe_filename(_FILENAME_TOKEN.sub(_sub, template))
+
+
 def _signature_md(config: dict, total_rows: int) -> list[str]:
     """Подпись провенанса. Плейсхолдер «{N}» в конфиге заменяется числом строк документа."""
     template = config.get("подпись", "")
@@ -804,14 +939,14 @@ def render_markdown(document: str, workspace, documents_dir: Path = DOCUMENTS_DI
             frame_lines = _frames_section_md(section, workspace, params)
             if frame_lines and section.get("номер") == "авто":
                 auto_n += 1
-                frame_lines[0] = f"## {auto_n}. {section.get('заголовок', '')}"
+                frame_lines[0] = f"## {auto_n:02d}. {section.get('заголовок', '')}"
             lines += frame_lines
             continue
         if section.get("тип") == "текст":
             text_lines = _text_section_md(section, workspace, params)
             if text_lines and section.get("номер") == "авто":
                 auto_n += 1
-                text_lines[0] = f"## {auto_n}. {section.get('заголовок', '')}"
+                text_lines[0] = f"## {auto_n:02d}. {section.get('заголовок', '')}"
             lines += text_lines
             continue
         if section.get("тип") == "процессы":
@@ -820,7 +955,7 @@ def render_markdown(document: str, workspace, documents_dir: Path = DOCUMENTS_DI
                                                   anchor_row=anchor_row)
             if tree_lines and section.get("номер") == "авто":
                 auto_n += 1
-                tree_lines[0] = f"## {auto_n}. {section.get('заголовок', '')}"
+                tree_lines[0] = f"## {auto_n:02d}. {section.get('заголовок', '')}"
             total_rows += shown
             lines += tree_lines
             continue
@@ -830,7 +965,7 @@ def render_markdown(document: str, workspace, documents_dir: Path = DOCUMENTS_DI
                                             anchor_row=anchor_row)
         if section_lines and section.get("номер") == "авто":
             auto_n += 1
-            section_lines[0] = f"## {auto_n}. {section.get('заголовок', '')}"
+            section_lines[0] = f"## {auto_n:02d}. {section.get('заголовок', '')}"
         total_rows += shown
         lines += section_lines
 

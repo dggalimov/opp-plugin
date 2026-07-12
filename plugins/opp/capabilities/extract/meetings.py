@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from capabilities import paths
 from capabilities.extract.secrets import get_secret
 
 VIDEO = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
@@ -116,12 +117,13 @@ def transcribe(media_path) -> tuple[str, bool, str]:
 
 
 def frames_dir(workspace, src_code: str) -> Path:
-    """Путь к папке кадров узла записи по конвенции спеки 06-f: `<workspace>/Источники/_кадры/<код-узла>/`.
+    """Путь к папке кадров узла записи по конвенции спеки 06-f/08 §8:
+    `<workspace>/Проектная память/Источники/_кадры/<код-узла>/`.
 
     Создаёт папку и возвращает путь. Вызывается навыком `analyze-meeting` по согласию
     пользователя («разобрать на кадры?»), не самим `extract_frames`.
     """
-    d = Path(workspace) / "Источники" / "_кадры" / src_code
+    d = paths.sources_dir(workspace) / "_кадры" / src_code
     d.mkdir(parents=True, exist_ok=True)
     return d
 

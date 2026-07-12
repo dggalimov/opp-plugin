@@ -1,8 +1,11 @@
 """Конвертеры форматов источников → markdown (бронза). Контент не теряем.
 
-Лёгкие форматы — стандартная библиотека. Офис/таблицы/презентации, PDF, изображения — системные
-инструменты (LibreOffice `soffice`, `pdftotext`, `tesseract`), если установлены. Чего не умеем —
-честно помечаем `readable=false` с подсказкой, но узел всё равно создаётся (ничего не теряем).
+Лёгкие форматы — стандартная библиотека. `.xlsx/.xlsm` и `.docx` — python-native (openpyxl,
+python-docx: ставятся в venv автоматически, внешних бинарей не требуют). Остальной офис/PDF/
+изображения — системные инструменты (LibreOffice `soffice`, `pdftotext`, `tesseract`), если
+установлены. Чего не умеем — честно помечаем `readable=false` с различимой причиной (нет
+бинаря / не успел за таймаут / ошибка конвертации / битый файл), но узел всё равно создаётся
+(ничего не теряем).
 """
 
 from __future__ import annotations
@@ -19,8 +22,10 @@ from pathlib import Path
 from capabilities.extract.secrets import get_secret
 
 LIGHT_TEXT = {".txt", ".log", ".md", ".markdown"}
-OFFICE_TEXT = {".docx", ".doc", ".odt", ".rtf", ".pptx", ".ppt"}
-OFFICE_SHEET = {".xlsx", ".xls", ".xlsm", ".xlsb", ".ods"}
+XLSX_NATIVE = {".xlsx", ".xlsm"}  # openpyxl, без soffice
+DOCX_NATIVE = {".docx"}  # python-docx, без soffice
+OFFICE_TEXT = {".doc", ".odt", ".rtf", ".pptx", ".ppt"}  # fallback — soffice
+OFFICE_SHEET = {".xls", ".xlsb", ".ods"}  # fallback — soffice
 IMAGES = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 MEDIA = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".mp4", ".mov", ".avi", ".mkv", ".webm"}
 NEXT_STEP = {".mpp", ".mxl"}
@@ -66,22 +71,46 @@ def _strip_html(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", text)).strip()
 
 
-def _soffice(p: Path, to: str):
+def _short_err(exc) -> str:
+    """Кратко: текст ошибки, обрезанный для note реестра."""
+    s = str(exc).strip()
+    if not s:
+        return "неизвестная ошибка"
+    return (s[:157] + "…") if len(s) > 158 else s
+
+
+def _soffice_timeout(p: Path) -> int:
+    """180с + 15с/МБ, потолок 900с (спека 08 §7)."""
+    size_mb = p.stat().st_size / (1024 * 1024)
+    return min(900, int(180 + 15 * size_mb))
+
+
+def _soffice(p: Path, to: str) -> tuple:
+    """Конвертировать через LibreOffice. Возвращает (текст|None, note) — note различает причину
+    отказа: нет бинаря / не успел за таймаут / ошибка конвертации (спека 08 §7)."""
     if not _have("soffice"):
-        return None
+        return None, "нужен LibreOffice (soffice) — см. УСТАНОВКА"
+    timeout = _soffice_timeout(p)
     with tempfile.TemporaryDirectory() as d:
         try:
             subprocess.run(
                 ["soffice", "--headless", f"-env:UserInstallation=file://{d}/prof",
                  "--convert-to", to, "--outdir", d, str(p)],
-                check=True, capture_output=True, timeout=180)
-        except Exception:
-            return None
+                check=True, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            size_mb = p.stat().st_size / (1024 * 1024)
+            return None, (f"LibreOffice не успел (файл {size_mb:.1f} МБ, лимит {timeout} с) — "
+                          "повторите или разбейте файл")
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or b"").decode("utf-8", "replace").strip() if exc.stderr else ""
+            return None, f"ошибка конвертации LibreOffice: {_short_err(err) if err else 'см. код возврата soffice'}"
+        except Exception as exc:  # noqa: BLE001
+            return None, f"ошибка конвертации LibreOffice: {_short_err(exc)}"
         ext = to.split(":")[0]
         outs = list(Path(d).glob(f"*.{ext}"))
         if outs:
-            return outs[0].read_text(encoding="utf-8", errors="replace")
-    return None
+            return outs[0].read_text(encoding="utf-8", errors="replace"), ""
+    return None, "ошибка конвертации LibreOffice: файл результата не создан"
 
 
 def _pdf_text(p: Path):
@@ -287,6 +316,82 @@ def _vsdx_to_md(p: Path):
         return None
 
 
+def _xlsx_cell(v) -> str:
+    return "" if v is None else str(v)
+
+
+def _xlsx_native_to_md(p: Path) -> str:
+    """.xlsx/.xlsm → markdown через openpyxl (без LibreOffice, спека 08 §7).
+
+    По листу: «## <имя>» + md-таблица. Гигантские листы (данных строк > 300) — шапка +
+    первые 50 строк + «… всего строк: N» (полный счёт — материал для описи полноты, §4).
+    Битый файл — исключение наружу (ловит вызывающий, честный note без падения).
+    """
+    import openpyxl
+    GIANT_ROWS, PREVIEW_ROWS = 300, 50
+    wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+    try:
+        parts = []
+        for name in wb.sheetnames:
+            ws = wb[name]
+            rows = [list(r) for r in ws.iter_rows(values_only=True)]
+            while rows and all(c is None for c in rows[-1]):  # хвостовые пустые (форматирование)
+                rows.pop()
+            parts.append(f"## {name}")
+            if not rows:
+                parts.append("_(пустой лист)_")
+                continue
+            head, data = rows[0], rows[1:]
+            total = len(data)
+            truncated = total > GIANT_ROWS
+            shown = data[:PREVIEW_ROWS] if truncated else data
+            table = ["| " + " | ".join(_cell(_xlsx_cell(c)) for c in head) + " |",
+                     "|" + "|".join(["---"] * len(head)) + "|"]
+            for row in shown:
+                table.append("| " + " | ".join(_cell(_xlsx_cell(c)) for c in row) + " |")
+            parts.append("\n".join(table))
+            if truncated:
+                non_empty = sum(1 for row in data if any(c is not None for c in row))
+                parts.append(f"\n… всего строк: {total} (непустых: {non_empty})")
+        return "\n\n".join(parts)
+    finally:
+        wb.close()
+
+
+def _docx_native_to_md(p: Path) -> str:
+    """.docx → markdown через python-docx (без LibreOffice, спека 08 §7).
+
+    Параграфы (заголовки по стилю Heading N/Title → #-уровни, грубо) + таблицы → md-таблицы.
+    Битый файл — исключение наружу (ловит вызывающий, честный note без падения).
+    """
+    import docx
+    document = docx.Document(str(p))
+    parts = []
+    for para in document.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style = (para.style.name if para.style else "") or ""
+        m = re.match(r"Heading (\d+)", style)
+        if m:
+            parts.append("#" * min(int(m.group(1)), 6) + " " + text)
+        elif style == "Title":
+            parts.append("# " + text)
+        else:
+            parts.append(text)
+    for table in document.tables:
+        rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        if not rows:
+            continue
+        head, data = rows[0], rows[1:]
+        md = ["| " + " | ".join(_cell(c) for c in head) + " |",
+              "|" + "|".join(["---"] * len(head)) + "|"]
+        for r in data:
+            md.append("| " + " | ".join(_cell(c) for c in r) + " |")
+        parts.append("\n".join(md))
+    return "\n\n".join(parts)
+
+
 def _xlsx_shapes_to_md(p: Path):
     """Тексты плавающих фигур (текстовые блоки, SmartArt) внутри .xlsx/.xlsm.
 
@@ -349,19 +454,28 @@ def to_markdown(path) -> tuple[str, bool, str]:
         return "```xml\n" + _read_text(p) + "\n```", True, ""
     if suf in (".html", ".htm"):
         return _strip_html(_read_text(p)), True, ""
-    if suf in OFFICE_TEXT:
-        t = _soffice(p, "txt:Text")
-        return (t, True, "") if t is not None else ("", False, "нужен LibreOffice (soffice)")
-    if suf in OFFICE_SHEET:
-        t = _soffice(p, "html:HTML")
-        if t is None:
-            return "", False, "нужен LibreOffice (soffice)"
-        md = _strip_html(t)
-        if suf in (".xlsx", ".xlsm"):
-            shapes_md = _xlsx_shapes_to_md(p)
-            if shapes_md:
-                md = md + "\n\n" + shapes_md
+    if suf in DOCX_NATIVE:
+        try:
+            return _docx_native_to_md(p), True, ""
+        except Exception as exc:  # noqa: BLE001 — битый файл, не падение
+            return "", False, f"не удалось прочитать ({_short_err(exc)})"
+    if suf in XLSX_NATIVE:
+        try:
+            md = _xlsx_native_to_md(p)
+        except Exception as exc:  # noqa: BLE001 — битый файл, не падение
+            return "", False, f"не удалось прочитать ({_short_err(exc)})"
+        shapes_md = _xlsx_shapes_to_md(p)
+        if shapes_md:
+            md = md + "\n\n" + shapes_md
         return md, True, ""
+    if suf in OFFICE_TEXT:
+        t, note = _soffice(p, "txt:Text")
+        return (t, True, "") if t is not None else ("", False, note)
+    if suf in OFFICE_SHEET:
+        t, note = _soffice(p, "html:HTML")
+        if t is None:
+            return "", False, note
+        return _strip_html(t), True, ""
     if suf == ".pdf":
         t = _pdf_text(p)
         if t is not None and t.strip():
@@ -407,7 +521,8 @@ def adapter_status() -> list[dict]:
     return [
         {"группа": "Текст/таблицы/данные", "форматы": "txt, md, csv, tsv, json, xml, html",
          "статус": "работает"},
-        {"группа": "Офис", "форматы": "docx, doc, xlsx, xls, xlsm, xlsb, pptx, ppt, ods, rtf",
+        {"группа": "Офис (native)", "форматы": "docx, xlsx, xlsm", "статус": "работает"},
+        {"группа": "Офис (LibreOffice)", "форматы": "doc, xls, xlsb, pptx, ppt, ods, rtf",
          "статус": "работает" if _have("soffice") else "нужен LibreOffice"},
         {"группа": "PDF", "форматы": "pdf",
          "статус": "работает" if _have("pdftotext") else "нужен pdftotext"},

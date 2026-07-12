@@ -13,6 +13,7 @@
   ingest      — принять источники в проект (бронза);
   extract     — задание на извлечение строк таблицы из сырья проекта;
   triangulate — сверка источников/уровней → задание на синтез;
+  picture     — картина каркаса по 11 уровням (готовность разведки), опц. --вопросы;
   prove       — отчёт по доказательствам ущерба: гейт ОБЭ + воспроизводимость EFF;
   requirements — отчёт по требованиям и покрытию проблем (TB);
   solutions   — отчёт по решениям (SOL) и покрытию требований;
@@ -333,6 +334,28 @@ def cmd_triangulate(args) -> int:
     return 0
 
 
+def cmd_picture(args) -> int:
+    from linter.model import MemoryLoadError
+    from synthesis.picture import build_picture, fmt_picture, write_picture, generate_questions
+    ws = Path(args.into).resolve()
+    if not ws.is_dir():
+        print(f"Папка проекта не найдена: {ws}")
+        return 1
+    try:
+        data = build_picture(ws)
+    except MemoryLoadError as exc:
+        print(f"Память проекта не читается: {exc}")
+        return 1
+    print(fmt_picture(data))
+    canon = write_picture(ws)
+    print(f"\nКанон картины: {canon}")
+    if args.вопросы:
+        report = generate_questions(ws, data)
+        print(f"Открытые вопросы: заведено {report['заведено']}, "
+              f"пропущено дублей {report['пропущено дублей']}")
+    return 0
+
+
 def cmd_prove(args) -> int:
     import json
     from linter.model import MemoryLoadError
@@ -419,7 +442,8 @@ def cmd_roadmap(args) -> int:
 
 
 def cmd_render(args) -> int:
-    from capabilities.render.engine import render_markdown, load_config, RenderError
+    from capabilities.render.engine import render_markdown, load_config, resolve_output_name, RenderError
+    from capabilities.paths import docs_tech_dir
     ws = Path(args.into).resolve()
     if not ws.is_dir():
         print(f"Папка проекта не найдена: {ws}")
@@ -445,11 +469,14 @@ def cmd_render(args) -> int:
         print(str(exc))
         return 1
 
-    out_dir = ws / "Документы"
-    out_dir.mkdir(parents=True, exist_ok=True)
     # параметризованный рендер — свой файл на значение (протоколы/повестки встреч не затирают друг друга)
     suffix = "".join(f"-{params[p]}" for p in ("источник", "встреча") if params.get(p))
-    md_path = out_dir / f"{args.document}{suffix}.md"
+
+    # md-канон (техслой) — «Проектная память/Документы», клиентский docx — «Документы» с человеческим
+    # именем по формуле конфига (спека 08 §8, клиентский слой отделён от технического)
+    tech_dir = docs_tech_dir(ws)
+    tech_dir.mkdir(parents=True, exist_ok=True)
+    md_path = tech_dir / f"{args.document}{suffix}.md"
     md_path.write_text(md, encoding="utf-8")
     print(f"Документ собран: {md_path}")
 
@@ -458,10 +485,22 @@ def cmd_render(args) -> int:
         # тот же эффективный конфиг, что и у md выше (проектный шаблон, если есть, — спека 06-f):
         # без этого проектный шаблон менял бы заголовок md, а docx-титул расходился бы с ним
         cfg = load_config(args.document, workspace=ws)
-        title = (cfg.get("документ") or {}).get("название", args.document)
+        document_cfg = cfg.get("документ") or {}
+        title = document_cfg.get("название", args.document)
+        # рабочие/рассылочные документы («документ.титул: нет», спека 08 §8) — без титульного
+        # листа и «Содержания»; по умолчанию (ключ не задан) титул остаётся
+        титул = document_cfg.get("титул") != "нет"
+        try:
+            client_name = resolve_output_name(args.document, ws, params=params)
+        except RenderError as exc:
+            print(str(exc))
+            return 1
+        docx_name = f"{client_name}.docx" if client_name else f"{args.document}{suffix}.docx"
+        out_dir = ws / "Документы"
+        out_dir.mkdir(parents=True, exist_ok=True)
         docx_path = render_docx(
-            md, out_dir / f"{args.document}{suffix}.docx", project=str(ws), document_title=title,
-            titul_client=args.титул_клиент, titul_date=args.титул_дата)
+            md, out_dir / docx_name, project=str(ws), document_title=title,
+            titul_client=args.титул_клиент, titul_date=args.титул_дата, титул=титул)
         print(f"Docx собран: {docx_path}")
     return 0
 
@@ -537,6 +576,12 @@ def main(argv=None) -> int:
     p_tri = sub.add_parser("triangulate", help="сверка источников/уровней → задание на синтез")
     p_tri.add_argument("--into", required=True, help="папка проекта")
     p_tri.set_defaults(func=cmd_triangulate)
+
+    p_pic = sub.add_parser("picture", help="картина каркаса по 11 уровням (готовность разведки)")
+    p_pic.add_argument("--into", required=True, help="папка проекта")
+    p_pic.add_argument("--вопросы", action="store_true",
+                       help="дополнительно завести открытые вопросы (OQ) из дыр картины")
+    p_pic.set_defaults(func=cmd_picture)
 
     p_prove = sub.add_parser("prove", help="отчёт по доказательствам ущерба: гейт ОБЭ + воспроизводимость EFF")
     p_prove.add_argument("--into", required=True, help="папка проекта")

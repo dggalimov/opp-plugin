@@ -20,10 +20,10 @@
 from __future__ import annotations
 from pathlib import Path
 
+from capabilities import paths
 from linter.violation import Violation
 from .model import load_schema, Table, targets_of
 
-_SOURCES_DIR = "Источники"   # сырьё проекта (бронза из приёма источников, комп.02)
 _MEMORY_DIR = "memory"        # строки таблиц фактов (silver)
 _INSTR_DIR = "инструкции"     # правка инструкции пользователем per-project: <ws>/инструкции/<код>.md
 
@@ -89,7 +89,7 @@ def _memory_digest(table: Table, workspace: Path, максимум: int = 200) -
 def _raw_sources(workspace: Path) -> list:
     """Все узлы-источники «Источники/» РЕКУРСИВНО (навыки кладут в подпапки Документы/, База данных/…).
     Относительный путь — чтобы агент видел канал/подпапку (полнота входа, методика р.3)."""
-    d = Path(workspace) / _SOURCES_DIR
+    d = paths.sources_dir(workspace)
     if not d.is_dir():
         return []
     return sorted(str(p.relative_to(d)) for p in d.rglob("*.md")

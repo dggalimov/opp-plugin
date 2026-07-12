@@ -2,7 +2,8 @@
 
 Хранение в двух местах:
 - **Коробка** — `capabilities/extract/profiles/<config>.yaml` (предзаполнено по известным конфигурациям).
-- **Проект** — `<проект>/Источники/профили/<config>.yaml` (переопределение, правится в окне).
+- **Проект** — `<проект>/Проектная память/Источники/профили/<config>.yaml` (переопределение,
+  правится в окне; ЗР-0027 п.7 — техслой источников целиком под «Проектной памятью»).
 
 Действует переопределение проекта, иначе коробка. Привязка к доменной БЗ структуры — поле `база_знаний`.
 """
@@ -10,9 +11,11 @@
 from __future__ import annotations
 from pathlib import Path
 
+from capabilities import paths
+
 HERE = Path(__file__).resolve().parent
 PROFILES_DIR = HERE / "profiles"
-PROJECT_SUBDIR = "Источники/профили"
+PROJECT_SUBDIR_NAME = "профили"
 
 
 def box_path(config_id: str) -> Path:
@@ -20,7 +23,7 @@ def box_path(config_id: str) -> Path:
 
 
 def project_path(project, config_id: str) -> Path:
-    return Path(project) / "Источники" / "профили" / f"{config_id}.yaml"
+    return paths.sources_dir(project) / PROJECT_SUBDIR_NAME / f"{config_id}.yaml"
 
 
 def list_profiles() -> list[str]:

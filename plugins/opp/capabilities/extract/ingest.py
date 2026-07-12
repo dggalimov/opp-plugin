@@ -10,9 +10,9 @@ import hashlib
 import re
 from pathlib import Path
 
+from capabilities import paths
 from capabilities.extract import convert
 
-SOURCES_DIR = "Источники"
 _KIND_LABEL = {"SRC-MAT": "документ", "SRC-REC": "запись встречи",
                "SRC-CFG": "срез конфигурации", "SRC-DAT": "срез данных",
                "SRC-LOG": "журнал регистрации", "SRC-COM": "карточка компании",
@@ -43,7 +43,7 @@ def classify(path) -> str:
 
 
 def _next_code(workspace, kind: str) -> str:
-    src = Path(workspace) / SOURCES_DIR
+    src = paths.sources_dir(workspace)
     n = 0
     if src.is_dir():
         for f in src.rglob(f"{kind}-*.md"):
@@ -65,10 +65,10 @@ def _sha256_file(path) -> str:
 def _build_index(workspace) -> dict:
     """Индекс уже принятых узлов-источников: {хеш → id} и {origin → (id, хеш|None)}.
 
-    Строится сканированием Источники/**/*.md (как _next_code). Используется codify*() ДО
+    Строится сканированием папки источников (paths.sources_dir) — как _next_code. Используется codify*() ДО
     конвертации/транскрибации, чтобы повторный приём не дублировал узлы и не тратил Newton.
     """
-    src = Path(workspace) / SOURCES_DIR
+    src = paths.sources_dir(workspace)
     by_hash, by_origin = {}, {}
     if src.is_dir():
         for f in src.rglob("SRC-*.md"):
@@ -86,7 +86,7 @@ def _build_index(workspace) -> dict:
 def _write_node(workspace, kind, title, origin, body, readable, extra=None, file_hash=None) -> dict:
     import yaml
     code = _next_code(workspace, kind)
-    folder = Path(workspace) / SOURCES_DIR / _CHANNEL.get(kind, "Документы")
+    folder = paths.sources_dir(workspace) / _CHANNEL.get(kind, "Документы")
     folder.mkdir(parents=True, exist_ok=True)
     front = {"id": code, "kind": _KIND_LABEL.get(kind, kind), "title": title,
              "origin": str(origin), "readable": readable, "ключ_базы": None}
@@ -152,7 +152,7 @@ def codify(workspace, src_path, origin=None, index=None) -> dict:
 
 
 def _next_base_key(workspace) -> str:
-    src = Path(workspace) / SOURCES_DIR
+    src = paths.sources_dir(workspace)
     keys = set()
     if src.is_dir():
         for f in src.rglob("SRC-*.md"):
@@ -239,7 +239,7 @@ def ingest(source, workspace) -> dict:
     if s.startswith(("http://", "https://")):
         if _is_cloud_file(s):
             try:
-                local = convert.download_url(s, Path(workspace) / SOURCES_DIR / "_загрузки")
+                local = convert.download_url(s, paths.sources_dir(workspace) / "_загрузки")
                 _handle(codify(workspace, local, origin=s, index=index))
             except Exception as exc:  # noqa: BLE001 — не скачалось → сохраняем как ссылку
                 res = codify_link(workspace, s, index=index)
@@ -292,6 +292,10 @@ def _summary(body: str) -> str:
             continue
         if s.startswith(("```", "---")):
             continue
+        # причина нечитаемости (_write_node оборачивает её курсивом) — не пропускать, а показать
+        if s.startswith("_") and s.endswith("_") and "Контент не извлечён" in s:
+            s = s.strip("_").strip()
+            return (s[:117] + "…") if len(s) > 118 else s
         s = s.strip("|").strip()  # для табличных строк убрать рамку
         if s and not s.startswith(("#", "_", "<")):
             return (s[:117] + "…") if len(s) > 118 else s
@@ -300,7 +304,7 @@ def _summary(body: str) -> str:
 
 def build_manifest(workspace) -> Path:
     """Сгенерировать производный реестр материалов из шапок узлов."""
-    src = Path(workspace) / SOURCES_DIR
+    src = paths.sources_dir(workspace)
     rows = []
     if src.is_dir():
         for f in sorted(src.rglob("SRC-*.md")):

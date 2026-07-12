@@ -85,6 +85,27 @@ def lint_schema(schema=None) -> list:
     problems.extend(_required_derived_problems(schema))
     problems.extend(_edge_field_problems(schema))
     problems.extend(_pipeline_problems(schema))
+    problems.extend(_significance_problems(schema))
+    return problems
+
+
+# Флаг «значимость: полнота» (ЗР-0027, спека 08 §2): пустота такого поля у существующей строки —
+# дыра картины каркаса (builder asis-levels), не ошибка целостности (C5: пустое поле — тоже фактура).
+_ЗНАЧИМОСТЬ = {"полнота"}
+
+
+def _significance_problems(schema) -> list:
+    """Значение атрибута «значимость» (если задан) ∈ словаря допустимых — иное является замечанием
+    (опечатка/незнакомое значение в контракте, не в данных проекта)."""
+    problems = []
+    for code, tab in schema.tables.items():
+        for f in tab.fields:
+            зн = f.significance
+            if зн is None:
+                continue
+            if зн not in _ЗНАЧИМОСТЬ:
+                problems.append(Violation(where=f"#{code}.{f.name}",
+                    message=f"неизвестное значение «значимость: {зн}» (допустимо: {sorted(_ЗНАЧИМОСТЬ)})"))
     return problems
 
 

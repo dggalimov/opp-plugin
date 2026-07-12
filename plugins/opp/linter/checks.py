@@ -140,6 +140,7 @@ def _semantic_invariants(memory, schema, index) -> list:
     problems += _check_acyclic(memory, "PRC", "Код узла", "Родитель",
                                "цикл в иерархии процессов (узел — предок самого себя по цепи «Родитель»)")
     problems += _check_digital_trace(memory, schema, index)
+    problems += _check_fullness(memory, schema, index)
     return problems
 
 
@@ -272,4 +273,63 @@ def _check_digital_trace(memory, schema, index) -> list:
                 message=f"статус «цифровой след» при источнике природы "
                         f"«{', '.join(str(п or '—') for п in природы) or '—'}» — "
                         f"данные системы сильнее слов (методика р.4)"))
+    return problems
+
+
+def _check_fullness(memory, schema, index) -> list:
+    """Контроль полноты извлечения (спека 08 §4): опись сущностей MAT ↔ факт извлечённых строк.
+
+    Трёхтактный протокол материалов: опись (до извлечения) → извлечение → счётная сверка.
+    Здесь — механическая сверка (такт 3): опись меньше извлечённого — не сигнал (дозаполнение
+    другими каналами законно); опись больше извлечённого — WARN «недоизвлечено» (выборочный
+    разбор законен, но должен быть виден, не ERROR)."""
+    from schema.model import provenance_field
+    import yaml
+    problems = []
+    mat_tab = schema.tables.get("MAT")
+    if mat_tab is None:
+        return problems
+    mat_key = _key_field(mat_tab)
+    for row in _rows_of(memory, "MAT"):
+        код_мат = row.data.get(mat_key)
+        опись_текст = row.data.get("опись сущностей")
+        if опись_текст in (None, ""):
+            continue  # опись не заявлена — сверять нечего (не брак самой строки MAT)
+        try:
+            опись = yaml.safe_load(опись_текст)
+        except yaml.YAMLError:
+            опись = None
+        if not isinstance(опись, dict):
+            problems.append(Violation(
+                where=f"MAT:{код_мат}",
+                message=f"опись сущностей не читается как YAML-словарь (MAT-{код_мат})",
+                severity="WARN"))
+            continue
+        src_vals = _as_list(row.data.get("ссылка на источник"))
+        код_источника = src_vals[0] if src_vals else None
+        for код_таблицы, заявлено in опись.items():
+            код_таблицы = str(код_таблицы)
+            целевая = schema.tables.get(код_таблицы)
+            if целевая is None:
+                problems.append(Violation(
+                    where=f"MAT:{код_мат}",
+                    message=f"опись ссылается на несуществующую таблицу «{код_таблицы}» (MAT-{код_мат})",
+                    severity="WARN"))
+                continue
+            try:
+                заявлено_число = int(заявлено)
+            except (TypeError, ValueError):
+                continue
+            поле_источника = provenance_field(целевая)
+            извлечено = 0
+            if поле_источника and код_источника:
+                for r in _rows_of(memory, код_таблицы):
+                    if код_источника in _as_list(r.data.get(поле_источника)):
+                        извлечено += 1
+            if извлечено < заявлено_число:
+                problems.append(Violation(
+                    where=f"MAT:{код_мат}",
+                    message=f"недоизвлечено: {код_таблицы} {извлечено} из {заявлено_число} "
+                            f"({код_источника})",
+                    severity="WARN"))
     return problems

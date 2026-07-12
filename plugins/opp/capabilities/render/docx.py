@@ -14,9 +14,12 @@
 
 Витрина корпоративного документа (спека 05-b-report-asis, редакция 2): титульный лист (название,
 опционально клиент/дата — параметры render_docx) + страница «Содержание» с полем TOC (Word
-предлагает обновить его при открытии — это штатное поведение самого Word, не дефект рендера) +
+предлагает обновить его при открытии — это штатное поведение самого Word, не дефект рендера) —
+ОБА по ключу конфига «документ.титул» (спека 08 §8): рабочие/рассылочные документы (повестка, план
+встреч, открытые вопросы, гипотезы) идут с `титул=False` и не несут ни титула, ни «Содержания»;
 разрыв страницы перед каждым «## »-разделом. Стили: H2 — крупный текст цвета акцента, H3 — среднего
-размера тёмный; таблицы — шапка с заливкой темы + лёгкое чередование фона строк (полосатая заливка).
+размера тёмный; таблицы — шапка с заливкой темы + лёгкое чередование фона строк (полосатая заливка),
+ширины колонок — по содержимому (см. `_column_widths`).
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Mm, Pt, RGBColor
+from docx.shared import Cm, Mm, Pt, RGBColor
 
 from reference.theme import active_palette
 
@@ -234,10 +237,56 @@ def _repeat_header_row(row) -> None:
     tr_pr.append(tbl_header)
 
 
+_TABLE_TOTAL_WIDTH_CM = 26.7    # A4 ландшафт минус поля 15мм×2 (297мм-30мм), см. _setup_page
+_TABLE_MIN_WIDTH_FRAC = 0.06    # пол доли ширины на колонку (узкие «№»/«Код» не схлопываются в 0)
+_TABLE_MAX_WIDTH_FRAC = 0.40    # потолок доли — одна длинная «Формулировка» не съедает всю таблицу
+
+
+def _column_widths(header: list[str], rows: list[list[str]]) -> list:
+    """Автоширина колонок (порт `capabilities/export/xlsx.py::_autosize`, спека 08 §8): доля
+    общей ширины таблицы пропорциональна максимальной длине содержимого колонки (заголовок и
+    все строки; у ячеек с «<br>» — только первая строка переноса, иначе многострочные ячейки
+    раздувают оценку непропорционально), с полом/потолком доли — см. `_TABLE_MIN/MAX_WIDTH_FRAC`."""
+    ncols = len(header)
+    if ncols == 0:
+        return []
+    lens = [max(1, len(str(header[i]))) for i in range(ncols)]
+    for row in rows:
+        for i in range(min(ncols, len(row))):
+            first_line = str(row[i]).split("<br>")[0]
+            lens[i] = max(lens[i], len(first_line))
+    total_len = sum(lens)
+    min_cm = _TABLE_TOTAL_WIDTH_CM * _TABLE_MIN_WIDTH_FRAC
+    max_cm = _TABLE_TOTAL_WIDTH_CM * _TABLE_MAX_WIDTH_FRAC
+    widths_cm = []
+    for length in lens:
+        raw = (_TABLE_TOTAL_WIDTH_CM * (length / total_len) if total_len
+               else _TABLE_TOTAL_WIDTH_CM / ncols)
+        widths_cm.append(min(max(raw, min_cm), max_cm))
+    return [Cm(w) for w in widths_cm]
+
+
+def _apply_column_widths(table, widths: list) -> None:
+    """Проставить ширину каждой ячейке колонки (шапка + строки) — python-docx не держит ширину
+    надёжно, если задать её только на `table.columns[i]` без каждой ячейки в отдельности."""
+    if not widths:
+        return
+    table.autofit = False
+    table.allow_autofit = False
+    for row in table.rows:
+        for i, cell in enumerate(row.cells):
+            if i < len(widths):
+                cell.width = widths[i]
+    for i, column in enumerate(table.columns):
+        if i < len(widths):
+            column.width = widths[i]
+
+
 def _add_table(doc: Document, header: list[str], rows: list[list[str]], palette: dict) -> None:
     """Таблица отчёта (типографика 06.07): шапка — жирная, акцентная, с фоном, повторяется на
     разрыве страниц; первая колонка — жирная на светлом фоне (навигационная); «зебра» строк;
-    шрифт ячеек = основной − 1; в ячейках работают **жирный**, *курсив* и «<br>»."""
+    шрифт ячеек = основной − 1; в ячейках работают **жирный**, *курсив* и «<br>»; ширины колонок —
+    автоматически по содержимому (`_column_widths`)."""
     base_size = 10.5 - _TABLE_FONT_DELTA
     table = doc.add_table(rows=1, cols=len(header))
     table.style = "Table Grid"
@@ -255,6 +304,7 @@ def _add_table(doc: Document, header: list[str], rows: list[list[str]], palette:
         if row_idx % 2 == 1:
             for cell in cells[1:]:
                 _shade_cell(cell, palette["block"])
+    _apply_column_widths(table, _column_widths(header, rows))
     doc.add_paragraph()
 
 
@@ -301,7 +351,7 @@ def _add_title_page(doc: Document, document_title: str, client: str | None, when
 
     sub_p = doc.add_paragraph()
     sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub = sub_p.add_run("Обследование текущего состояния (AS-IS) · Проблемы · Целевые решения · Требования")
+    sub = sub_p.add_run(document_title)   # подзаголовок — «название» документа из конфига (спека 08 §8), не хардкод AS-IS
     sub.font.size = Pt(11)
     sub.font.color.rgb = _rgb(palette["text"])
 
@@ -440,12 +490,19 @@ def _add_callout(doc: Document, lines: list[str], palette: dict) -> None:
 
 
 def render_docx(md_text: str, out_path, project: str = "", document_title: str = "",
-                 titul_client: str | None = None, titul_date: str | None = None) -> Path:
+                 titul_client: str | None = None, titul_date: str | None = None,
+                 титул: bool = True) -> Path:
     """Собрать docx-файл из канонического md. Тема — active_palette(project_path проекта).
 
     `titul_client`/`titul_date` — параметры титульного листа (спека 05-b, редакция 2), оба
     опциональны и влияют ТОЛЬКО на docx (канонический md, проверяемый на байт-стабильность,
     титула не несёт).
+
+    `титул` (спека 08 §8, ключ конфига «документ.титул: нет») — рабочие/рассылочные документы
+    (повестка, план встреч, открытые вопросы, гипотезы) НЕ несут титульный лист и «Содержание»:
+    вызывающий код (cli.py/interface/documents.py) читает ключ из эффективного конфига документа
+    и передаёт сюда `титул=False`; по умолчанию (без ключа/явного параметра) титул остаётся, как
+    у корпоративных документов (протокол, отчёт AS-IS/TO-BE, протокол материалов).
     """
     out_path = Path(out_path)
     workspace = Path(project) if project and Path(str(project)).is_dir() else None
@@ -463,8 +520,9 @@ def render_docx(md_text: str, out_path, project: str = "", document_title: str =
     style.font.color.rgb = text_color
     style.paragraph_format.space_after = Pt(6)
 
-    _add_title_page(doc, title, titul_client, titul_date, palette)
-    _add_toc_page(doc, palette)
+    if титул:
+        _add_title_page(doc, title, titul_client, titul_date, palette)
+        _add_toc_page(doc, palette)
 
     for block in _parse_blocks(md_text):
         if block["type"] == "heading":
